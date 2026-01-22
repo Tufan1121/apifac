@@ -1,5 +1,11 @@
 import pyodbc
 import mysql.connector
+import json
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def conectaFox(foxDB): #foxDB
     try:
@@ -18,13 +24,13 @@ def conectaFox(foxDB): #foxDB
 
 def conectaMaria(database): #mariaDB
     if not database:
-            database="kaisen"
+            database = os.getenv("DB_DATABASE", "kaisen")
     cadena_conexion = {
-        "user": "root",
-        "password": "Nq37.321.1",
-        "host": "127.0.0.1",
+        "user": os.getenv("DB_USER"),
+        "password": os.getenv("DB_PASSWORD"),
+        "host": os.getenv("DB_HOST"),
         "database": database,
-        "port": 3307,
+        "port": int(os.getenv("DB_PORT", 3307)),
     }
     return  cadena_conexion 
     

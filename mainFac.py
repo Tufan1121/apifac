@@ -182,11 +182,11 @@ class UserCredentials(BaseModel):
 # Configura los parámetros de conexión a la base de datos
 def db_config():
     return pymysql.connect(
-        host="127.0.0.1",
-        user="root" ,
-        password="Nq37.321.1",
-        database="kaisen",
-        port=3307,  # Cambia el puerto si es necesario
+        host=os.getenv("DB_HOST"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_DATABASE"),
+        port=int(os.getenv("DB_PORT", 3307)),
         cursorclass=pymysql.cursors.DictCursor
     )
 
@@ -624,11 +624,11 @@ def get_pago_tik(tabla: str, documen: str):
 
 def cargar_datos():      
     conexion = mysql.connector.connect(
-        host='127.0.0.1',
-        user='root',
-        password='Nq37.321.1',
-        database='kaisen',
-        port=3307
+        host=os.getenv("DB_HOST", "127.0.0.1"),
+        user=os.getenv("DB_USER", "root"),
+        password=os.getenv("DB_PASSWORD", "Nq37.321.1"),
+        database=os.getenv("DB_DATABASE", "kaisen"),
+        port=int(os.getenv("DB_PORT", 3307))
     )
 
     df_gspock = pd.read_sql("SELECT * FROM gspock WHERE hm > 0;", conexion)
