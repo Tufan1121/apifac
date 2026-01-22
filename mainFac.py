@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, HTTPException, status, Depends
+from fastapi import FastAPI, Query, HTTPException, status, Depends, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
@@ -28,10 +28,9 @@ from base64 import b64decode
 import re
 from defusedxml.ElementTree import fromstring as safe_fromstring  # asegúrate de este import
 from zoneinfo import ZoneInfo
-
+from pypdf import PdfReader
+from io import BytesIO
 ###########################################################################
-
-load_dotenv()
 
 #uvicorn main:app --host 0.0.0.0 --port 800 --reload
 app = FastAPI()
@@ -57,7 +56,7 @@ app.add_middleware(
     allow_headers=["*"],  # Permite todos los headers
 )
 
-
+ 
 # Configuración de JWT
 SECRET_KEY = "z7SM49A&wEHBGedidwimbb25xadjimmcxwIdBAQQgdE2Tfz+4caLuc3L1i"  # Usa una clave secreta segura
 ALGORITHM = "HS256"
@@ -405,6 +404,7 @@ async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_
 
     estado_ticket = resultado.get("estado")
     fecha_ticket = resultado.get("fecha")
+    _rfc=resultado.get("rfc")
     print("fecha",fecha_ticket)
 
     # Normalizar a datetime
@@ -435,15 +435,36 @@ async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_
             detail="El ticket ya no es facturable este mes"
         )
     
-    if estado_ticket == 2:
+    if estado_ticket == 2 and _rfc != "XAXX010101000":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket facturado")
     elif estado_ticket == 3:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket cancelado")
 
+    
+
     _detalle = get_ticket_d(_posed, _documen)
     _pago = get_pago_tik(_pagofac, _documen)
     
+    # Valida que el ticket no este siendo ocupado en otra sesion
+
     # 3) Devolver un único dict para evitar que FastAPI lo interprete mal
+    
+    _busy=lock_ticket_if_free(_pos,_documen)
+    print("esta ocupado",_busy)
+
+    if _busy.get("ok") and not _busy.get("acquired"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Ticket no disponible por el momento"
+        )
+    elif _busy.get("ok") and _busy.get("acquired"):
+        print("✅ Lock adquirido correctamente.")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket no encontrado"
+        )
+    
 
     print("sucursal", _almacen)
     print("ticket",resultado)
@@ -456,7 +477,43 @@ async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_
         "detalle": _detalle,
         "pago": _pago
     }
+
+@app.post("/ticket_estado")
+async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_user)):
+    _documen = factura.ticket
+    _prefijo = obtener_prefijo(_documen)
+    _almacen = get_almacen(_prefijo)
+
+    if not _prefijo or not _almacen:
+        return {"error": "Ticket no existe"}
+
+    _pos = f"pos{_almacen}"
+    _posed = f"posed{_almacen}"
+    _pagofac = f"pospago{_almacen}"
+
+    # 1) Intentar obtener el ticket y capturar la excepción interna si la hay
+    try:
+        resultado = get_ticket(_pos, _documen)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket no existe")
+
+    # 2) Si devuelve None o está vacío
+    if not resultado:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket no existe")
+
+    estado_ticket = resultado.get("estado")
+    fecha_ticket = resultado.get("fecha")
+    _rfc = resultado.get("rfc")
+    print("fecha",fecha_ticket)
     
+    if estado_ticket == 2 and _rfc != "XAXX010101000":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket facturado")
+    elif estado_ticket == 3:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket cancelado")
+    elif estado_ticket == 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket Libre")
+
+
 def get_almacen(_almacen: str) -> str:
     _almacen = _almacen.strip()
     conn_str = conectaFox('f:\\inapsis\\material\\datos\\')
@@ -475,22 +532,33 @@ def get_almacen(_almacen: str) -> str:
     else: 
         almacen = None
     
-# 🔎 Función reutilizable (fuera del endpoint)
+# ================================
+# 🔎 Consulta (tu función existente)
+# ================================
 def get_ticket(tabla: str, documen: str):
     _tabla = tabla
     conn = db_config()
     try:
         with conn.cursor() as cursor:
-            #sql = f"SELECT * FROM `{_tabla}` WHERE documen = %s"
-            sql = f"SELECT TRIM(documen) as noVenta, crea as fecha,(total-impuesto) as subtotal,impuesto,total,estado FROM `{_tabla}` WHERE documen = %s"
-            
+            sql = f"""
+                SELECT TRIM(documen) as noVenta,
+                       crea as fecha,
+                       (total-impuesto) as subtotal,
+                       impuesto,
+                       total,
+                       estado,
+                       rfc,
+                       lock_owner,
+                       lock_until,
+                       TIMESTAMPDIFF(SECOND, NOW(), lock_until) AS ttl_seconds
+                FROM `{_tabla}`
+                WHERE documen = %s
+            """
             cursor.execute(sql, (documen,))
             row = cursor.fetchone()
             return row if row else None
     finally:
         conn.close()
-    
-    return resultados
 
 # 🔎 Función reutilizable (fuera del endpoint)
 
@@ -627,3 +695,295 @@ async def sendm(destinatario: str, asunto: str, _usuario: str, _titulo: str,_tit
         enviarEmailSimplenol(destinatario, asunto, _usuario, _titulo,_titulo1,_titulo2, s_link, _attachment)
     else:
         enviarEmailSimplenol(destinatario, asunto, _usuario, _titulo,_titulo1,_titulo2, s_link)
+
+
+from typing import Optional, Dict, Any
+import uuid
+
+# ================================
+# 🔒 Lock: adquirir/renovar si está libre
+# ================================
+def lock_ticket_if_free(tabla: str, documen: str, owner: Optional[str] = None, ttl_minutes: int = 15) -> Dict[str, Any]:
+    """
+    Intenta adquirir el lock de un ticket por 'ttl_minutes'.
+    - Si no hay lock o está vencido → lo toma y devuelve acquired=True.
+    - Si está bloqueado por el mismo owner → renueva y devuelve acquired=True, renewed=True.
+    - Si está bloqueado por otro → acquired=False y devuelve ttl_seconds restantes.
+    """
+    if owner is None:
+        owner = str(uuid.uuid4())
+
+    conn = db_config()
+    try:
+        with conn.cursor() as cursor:
+            # 1) Leer estado actual del lock
+            sql_get = f"""
+                SELECT lock_owner,
+                       lock_until,
+                       TIMESTAMPDIFF(SECOND, NOW(), lock_until) AS ttl_seconds
+                FROM `{tabla}`
+                WHERE documen = %s
+            """
+            cursor.execute(sql_get, (documen,))
+            row = cursor.fetchone()
+
+            if not row:
+                return {"ok": False, "error": "NOT_FOUND", "message": "El ticket no existe."}
+
+            lock_owner, lock_until, ttl_seconds = row
+
+            # Convertir ttl_seconds a int de forma segura
+            if ttl_seconds is not None:
+                try:
+                    ttl_seconds = int(ttl_seconds)
+                except (ValueError, TypeError):
+                    ttl_seconds = 0
+            else:
+                ttl_seconds = 0
+
+            # 2) Si está libre o vencido → tomar lock de forma atómica
+            if (lock_until is None) or (ttl_seconds <= 0):
+                sql_lock = f"""
+                    UPDATE `{tabla}`
+                    SET lock_owner = %s,
+                        lock_until = DATE_ADD(NOW(), INTERVAL %s MINUTE)
+                    WHERE documen = %s
+                      AND (lock_until IS NULL OR lock_until < NOW())
+                """
+                cursor.execute(sql_lock, (owner, ttl_minutes, documen))
+                affected = cursor.rowcount
+                conn.commit()
+
+                if affected == 1:
+                    # Lock adquirido
+                    return {
+                        "ok": True,
+                        "acquired": True,
+                        "renewed": False,
+                        "owner": owner,
+                        "ttl_seconds": ttl_minutes * 60
+                    }
+
+                # Otro proceso se adelantó: releer y reportar estado
+                cursor.execute(sql_get, (documen,))
+                row2 = cursor.fetchone()
+                if not row2:
+                    return {"ok": False, "error": "NOT_FOUND"}
+                lock_owner2, lock_until2, ttl_seconds2 = row2
+                try:
+                    ttl_seconds2 = int(ttl_seconds2) if ttl_seconds2 is not None else 0
+                except (ValueError, TypeError):
+                    ttl_seconds2 = 0
+                return {
+                    "ok": True,
+                    "acquired": False,
+                    "owner": lock_owner2,
+                    "ttl_seconds": max(0, ttl_seconds2)
+                }
+
+            # 3) Ya está bloqueado y no ha expirado
+            if lock_owner == owner:
+                # Renovar TTL (heartbeat)
+                sql_renew = f"""
+                    UPDATE `{tabla}`
+                    SET lock_until = DATE_ADD(NOW(), INTERVAL %s MINUTE)
+                    WHERE documen = %s
+                      AND lock_owner = %s
+                      AND lock_until > NOW()
+                """
+                cursor.execute(sql_renew, (ttl_minutes, documen, owner))
+                conn.commit()
+                return {
+                    "ok": True,
+                    "acquired": True,
+                    "renewed": True,
+                    "owner": owner,
+                    "ttl_seconds": ttl_minutes * 60
+                }
+
+            # 4) Bloqueado por otro owner
+            return {
+                "ok": True,
+                "acquired": False,
+                "owner": lock_owner,
+                "ttl_seconds": max(0, ttl_seconds)
+            }
+
+    finally:
+        conn.close()
+
+
+# ================================
+# 🔁 Heartbeat: renovar si eres el dueño
+# ================================
+def refresh_ticket_lock(tabla: str, documen: str, owner: str, ttl_minutes: int = 15) -> Dict[str, Any]:
+    """
+    Renueva el lock si:
+      - lock_owner coincide con 'owner'
+      - el lock no ha expirado
+    """
+    conn = db_config()
+    try:
+        with conn.cursor() as cursor:
+            sql = f"""
+                UPDATE `{tabla}`
+                SET lock_until = DATE_ADD(NOW(), INTERVAL %s MINUTE)
+                WHERE documen = %s
+                  AND lock_owner = %s
+                  AND lock_until > NOW()
+            """
+            cursor.execute(sql, (ttl_minutes, documen, owner))
+            affected = cursor.rowcount
+            conn.commit()
+
+            if affected == 1:
+                return {"ok": True, "renewed": True, "ttl_seconds": ttl_minutes * 60}
+
+            # Si no renovó, informar por qué
+            sql_get = f"""
+                SELECT lock_owner,
+                       lock_until,
+                       TIMESTAMPDIFF(SECOND, NOW(), lock_until) AS ttl_seconds
+                FROM `{tabla}`
+                WHERE documen = %s
+            """
+            cursor.execute(sql_get, (documen,))
+            row = cursor.fetchone()
+            if not row:
+                return {"ok": False, "renewed": False, "error": "NOT_FOUND"}
+
+            lock_owner, lock_until, ttl_seconds = row
+            try:
+                ttl_seconds = int(ttl_seconds) if ttl_seconds is not None else 0
+            except (ValueError, TypeError):
+                ttl_seconds = 0
+
+            if lock_owner != owner:
+                return {"ok": False, "renewed": False, "error": "NOT_OWNER", "ttl_seconds": max(0, ttl_seconds)}
+            return {"ok": False, "renewed": False, "error": "EXPIRED", "ttl_seconds": 0}
+    finally:
+        conn.close()
+
+
+# ================================
+# 🧼 Liberar: al facturar o cancelar
+# ================================
+def release_ticket_lock(tabla: str, documen: str, owner: str) -> Dict[str, Any]:
+    """
+    Libera el lock sólo si 'owner' es quien lo tiene.
+    """
+    conn = db_config()
+    try:
+        with conn.cursor() as cursor:
+            sql = f"""
+                UPDATE `{tabla}`
+                SET lock_owner = NULL,
+                    lock_until = NULL
+                WHERE documen = %s
+                  AND lock_owner = %s
+            """
+            cursor.execute(sql, (documen, owner))
+            affected = cursor.rowcount
+            conn.commit()
+            return {"ok": True, "released": affected == 1}
+    finally:
+        conn.close()
+
+#############################################
+#####EXTRAE INFORMACION DE LA CONSTANCIA#####
+#############################################
+def pdf_to_text(pdf_bytes: bytes) -> str:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    return "\n".join((p.extract_text() or "") for p in reader.pages)
+
+def normalize(text: str) -> str:
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+def extract_field(pattern: str, text: str):
+    m = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+def extract_regimenes(text: str):
+    regimenes = []
+
+    block = re.search(
+        r"Regímenes:\s*\n(.*?)(?:\nObligaciones:|\nActividades|\Z)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not block:
+        return regimenes
+
+    for line in block.group(1).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # Quita fechas dd/mm/aaaa
+        line = re.sub(r"\d{2}/\d{2}/\d{4}", "", line).strip()
+        low = line.lower()
+
+        # Quita encabezados tipo: "Régimen Fecha Inicio Fecha Fin"
+        if "fecha inicio" in low or "fecha fin" in low:
+            continue
+        if low in ("régimen", "regimen"):
+            continue
+
+        # Acepta líneas que contienen el texto del régimen
+        # (en tus PDFs vienen como "Régimen de ..." o "Régimen General ...")
+        if low.startswith("régimen") or low.startswith("regimen"):
+            regimenes.append(line)
+
+    # Dedup conservando orden
+    seen = set()
+    out = []
+    for r in regimenes:
+        key = r.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+def extract_razon_social(text: str):
+    # Persona moral
+    rs = extract_field(r"Denominación/Razón Social:\s*([^\n]+)", text)
+    if rs:
+        return rs
+
+    # Persona física (arma nombre completo)
+    nombre = extract_field(r"Nombre\s*\(s\):\s*([^\n]+)", text)
+    ap1 = extract_field(r"Primer Apellido:\s*([^\n]+)", text)
+    ap2 = extract_field(r"Segundo Apellido:\s*([^\n]+)", text)
+
+    parts = [p for p in [nombre, ap1, ap2] if p]
+    return " ".join(parts) if parts else None
+
+def x(s: str) -> str:
+    return html.escape(s or "")
+
+@app.post("/csf/extract")
+async def extract_csf(file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+
+    # Seguridad mínima (sin guardar a disco)
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(400, "Archivo no es un PDF válido")
+    if len(pdf_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(413, "PDF demasiado grande")
+
+    text = normalize(pdf_to_text(pdf_bytes))
+    if not text:
+        raise HTTPException(422, "PDF sin texto (escaneado)")
+
+    return {
+        "ok": True,
+        "data": {
+            "rfc": extract_field(r"RFC:\s*([A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3})", text),
+            "razon_social": extract_razon_social(text),
+            "codigo_postal": extract_field(r"Código Postal:\s*([0-9]{5})", text),
+            "regimenes": extract_regimenes(text),
+        },
+    }

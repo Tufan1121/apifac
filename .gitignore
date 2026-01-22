@@ -1,1 +1,30 @@
-*.bat
+# Ignorar archivos y directorios generados
+*.pyc
+__pycache__/
+
+# Ignorar entornos virtuales
+venv/
+
+# Ignorar archivos .env (variables de entorno)
+.env
+*.env
+
+# Ignorar configuraciones locales y sensibles
+config/settings_local.py
+
+# Ignorar archivos de logs
+*.log
+
+# Ignorar archivos de IDEs
+.idea/
+.vscode/
+
+# Ignorar archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Ignorar certificados y llaves
+cer/
+*.cer
+*.key
+*.pem
