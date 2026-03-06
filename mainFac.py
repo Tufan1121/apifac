@@ -429,7 +429,7 @@ async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_
     # Hora del sistema en Zona Horaria de México (CDMX)
     ahora = datetime.now(ZoneInfo("America/Mexico_City"))
     
-    if (dt_ticket.year != ahora.year) or (dt_ticket.month != ahora.month):
+    if (dt_ticket.year != ahora.year) or (dt_ticket.month != ahora.month) and _rfc != "XAXX010101000":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El ticket ya no es facturable este mes"
