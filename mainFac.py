@@ -1,6 +1,10 @@
-from fastapi import FastAPI, Query, HTTPException, status, Depends, UploadFile, File
+from fastapi import FastAPI, Query, HTTPException, status, Depends, UploadFile, File, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from collections import defaultdict
+import time as _time
 import jwt
 from database import conectaFox  # Importa la función de tu otro script
 from database import conectaMaria  # Importa la función de tu otro script
@@ -32,8 +36,63 @@ from pypdf import PdfReader
 from io import BytesIO
 ###########################################################################
 
+load_dotenv()
+
+# =============================================================================
+# Middleware de seguridad contra escaneos de bots y ataques automatizados
+# =============================================================================
+BLOCKED_PATTERNS = re.compile(
+    r'\.php|wp-admin|wp-includes|wp-content|wp-login|xmlrpc|'
+    r'wlwmanifest|wp-trackback|filemanager|\.asp|\.aspx|\.cgi|'
+    r'\.env|phpmyadmin|/admin\.php|/shell|/config\.php',
+    re.IGNORECASE
+)
+
+_suspicious_hits: dict[str, list[float]] = defaultdict(list)
+_banned_ips: dict[str, float] = {}
+
+MAX_SUSPICIOUS_HITS = 10
+SUSPICIOUS_WINDOW = 60
+BAN_DURATION = 3600
+
+PERMANENTLY_BLOCKED_IPS: set[str] = set()
+
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host if request.client else "unknown"
+        path = request.url.path.lower()
+        now = _time.time()
+
+        if client_ip in PERMANENTLY_BLOCKED_IPS:
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
+        if client_ip in _banned_ips:
+            if now < _banned_ips[client_ip]:
+                return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+            else:
+                del _banned_ips[client_ip]
+                _suspicious_hits.pop(client_ip, None)
+
+        if BLOCKED_PATTERNS.search(path):
+            hits = _suspicious_hits[client_ip]
+            hits.append(now)
+            _suspicious_hits[client_ip] = [t for t in hits if now - t < SUSPICIOUS_WINDOW]
+
+            if len(_suspicious_hits[client_ip]) >= MAX_SUSPICIOUS_HITS:
+                _banned_ips[client_ip] = now + BAN_DURATION
+                _suspicious_hits.pop(client_ip, None)
+
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
+        response = await call_next(request)
+        return response
+
+
 #uvicorn main:app --host 0.0.0.0 --port 800 --reload
 app = FastAPI()
+
+app.add_middleware(SecurityMiddleware)
 
 origins = [
     "http://localhost",
@@ -58,7 +117,7 @@ app.add_middleware(
 
  
 # Configuración de JWT
-SECRET_KEY = "z7SM49A&wEHBGedidwimbb25xadjimmcxwIdBAQQgdE2Tfz+4caLuc3L1i"  # Usa una clave secreta segura
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080
 
