@@ -28,6 +28,3 @@ cer/
 *.cer
 *.key
 *.pem
-
-# Ignorar scripts batch
-*.bat
