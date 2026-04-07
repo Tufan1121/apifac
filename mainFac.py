@@ -36,6 +36,7 @@ from pypdf import PdfReader
 from io import BytesIO
 ###########################################################################
 
+<<<<<<< HEAD
 load_dotenv()
 
 # =============================================================================
@@ -488,13 +489,26 @@ async def tickets(factura: DocumentoPayload, usuario: str = Depends(get_current_
     # Hora del sistema en Zona Horaria de México (CDMX)
     ahora = datetime.now(ZoneInfo("America/Mexico_City"))
     
-    if (dt_ticket.year != ahora.year) or (dt_ticket.month != ahora.month) and _rfc != "XAXX010101000":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El ticket ya no es facturable este mes"
-        )
-    
-    if estado_ticket == 2 and _rfc != "XAXX010101000":
+    _es_mostrador = estado_ticket == 2 and (_rfc or "").strip() == "XAXX010101000"
+
+    # Calcular el mes anterior
+    if ahora.month == 1:
+        _mes_anterior = 12
+        _anio_anterior = ahora.year - 1
+    else:
+        _mes_anterior = ahora.month - 1
+        _anio_anterior = ahora.year
+
+    _es_mes_anterior = dt_ticket.year == _anio_anterior and dt_ticket.month == _mes_anterior
+
+    if (dt_ticket.year != ahora.year) or (dt_ticket.month != ahora.month):
+        if not (_es_mostrador and _es_mes_anterior):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El ticket ya no es facturable este mes"
+            )
+
+    if estado_ticket == 2 and not _es_mostrador:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket facturado")
     elif estado_ticket == 3:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ticket cancelado")
