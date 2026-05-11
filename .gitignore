@@ -28,3 +28,6 @@ cer/
 *.cer
 *.key
 *.pem
+
+# Ignorar scripts de arranque locales (rutas/credenciales por entorno)
+*.bat
